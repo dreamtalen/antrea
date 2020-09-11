@@ -17,6 +17,7 @@ package connections
 import (
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,11 +25,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/component-base/metrics/legacyregistry"
+	"k8s.io/component-base/metrics/testutil"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/flowexporter"
 	connectionstest "github.com/vmware-tanzu/antrea/pkg/agent/flowexporter/connections/testing"
 	"github.com/vmware-tanzu/antrea/pkg/agent/interfacestore"
 	interfacestoretest "github.com/vmware-tanzu/antrea/pkg/agent/interfacestore/testing"
+	"github.com/vmware-tanzu/antrea/pkg/agent/metrics"
 	proxytest "github.com/vmware-tanzu/antrea/pkg/agent/proxy/testing"
 	k8sproxy "github.com/vmware-tanzu/antrea/third_party/proxy"
 )
@@ -56,6 +60,7 @@ func makeTuple(srcIP *net.IP, dstIP *net.IP, protoID uint8, srcPort uint16, dstP
 func TestConnectionStore_addAndUpdateConn(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
+	metrics.InitializeConnectionMetrics()
 	// Create two flows; one is already in ConnectionStore and other one is new
 	refTime := time.Now()
 	// Flow-1, which is already in ConnectionStore
@@ -138,6 +143,8 @@ func TestConnectionStore_addAndUpdateConn(t *testing.T) {
 	// Add flow1conn to the Connection map
 	testFlow1Tuple := flowexporter.NewConnectionKey(&testFlow1)
 	connStore.connections[testFlow1Tuple] = oldTestFlow1
+	// For testing purposes, increment the metric
+	metrics.TotalAntreaConnectionsInConnTrackTable.Inc()
 
 	addOrUpdateConnTests := []struct {
 		flow flowexporter.Connection
@@ -170,6 +177,7 @@ func TestConnectionStore_addAndUpdateConn(t *testing.T) {
 		actualConn, ok := connStore.GetConnByKey(flowTuple)
 		assert.Equal(t, ok, true, "connection should be there in connection store")
 		assert.Equal(t, expConn, *actualConn, "Connections should be equal")
+		checkAntreaConnectionMetrics(t, len(connStore.connections))
 	}
 }
 
@@ -238,6 +246,7 @@ func TestConnectionStore_ForAllConnectionsDo(t *testing.T) {
 func TestConnectionStore_DeleteConnectionByKey(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
+	metrics.InitializeConnectionMetrics()
 	// Create two flows; one is already in ConnectionStore and other one is new
 	testFlows := make([]*flowexporter.Connection, 2)
 	testFlowKeys := make([]*flowexporter.ConnectionKey, 2)
@@ -272,6 +281,8 @@ func TestConnectionStore_DeleteConnectionByKey(t *testing.T) {
 		connKey := flowexporter.NewConnectionKey(flow)
 		testFlowKeys[i] = &connKey
 	}
+	// For testing purposes, set the metric
+	metrics.TotalAntreaConnectionsInConnTrackTable.Set(float64(len(testFlows)))
 	// Create ConnectionStore
 	mockIfaceStore := interfacestoretest.NewMockInterfaceStore(ctrl)
 	mockConnDumper := connectionstest.NewMockConnTrackDumper(ctrl)
@@ -286,5 +297,16 @@ func TestConnectionStore_DeleteConnectionByKey(t *testing.T) {
 		assert.Nil(t, err, "DeleteConnectionByKey should return nil")
 		_, exists := connStore.GetConnByKey(*testFlowKeys[i])
 		assert.Equal(t, exists, false, "connection should be deleted in connection store")
+		checkAntreaConnectionMetrics(t, len(connStore.connections))
 	}
+}
+
+func checkAntreaConnectionMetrics(t *testing.T, numConns int) {
+	expectedAntreaConnectionCount := `
+	# HELP antrea_agent_conntrack_antrea_connection_count [ALPHA] Number of connections in the Antrea ZoneID of the conntrack table.
+	# TYPE antrea_agent_conntrack_antrea_connection_count gauge
+	`
+	expectedAntreaConnectionCount = expectedAntreaConnectionCount + fmt.Sprintf("antrea_agent_conntrack_antrea_connection_count %d\n", numConns)
+
+	assert.Equal(t, nil, testutil.GatherAndCompare(legacyregistry.DefaultGatherer, strings.NewReader(expectedAntreaConnectionCount), "antrea_agent_conntrack_antrea_connection_count"))
 }

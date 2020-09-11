@@ -24,6 +24,7 @@ import (
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/config"
 	"github.com/vmware-tanzu/antrea/pkg/agent/flowexporter"
+	"github.com/vmware-tanzu/antrea/pkg/agent/metrics"
 	"github.com/vmware-tanzu/antrea/pkg/ovs/ovsctl"
 )
 
@@ -49,11 +50,25 @@ func NewConnTrackOvsAppCtl(nodeConfig *config.NodeConfig, serviceCIDR *net.IPNet
 	if ovsctlClient == nil {
 		return nil
 	}
-	return &connTrackOvsCtl{
+	ct := &connTrackOvsCtl{
 		nodeConfig,
 		serviceCIDR,
 		ovsctlClient,
 	}
+
+	cmdOutput, execErr := ct.ovsctlClient.RunAppctlCmd("dpctl/ct-get-maxconns", false)
+	if execErr != nil {
+		klog.Errorf("error when executing dpctl/ct-get-maxconns command: %v", execErr)
+		return nil
+	}
+	maxConns, err := strconv.Atoi(strings.TrimSpace(string(cmdOutput)))
+	if err != nil {
+		klog.Errorf("error when convert dpctl/ct-get-maxconns cmdoutput to int: %v", err)
+		return nil
+	}
+	metrics.MaxConnectionsInConnTrackTable.Set(float64(maxConns))
+
+	return ct
 }
 
 // DumpFlows uses "ovs-appctl dpctl/dump-conntrack" to dump conntrack flows in the Antrea ZoneID.
@@ -90,6 +105,8 @@ func (ct *connTrackOvsCtl) ovsAppctlDumpConnections(zoneFilter uint16) ([]*flowe
 			antreaConns = append(antreaConns, conn)
 		}
 	}
+
+	metrics.TotalConnectionsInConnTrackTable.Set(float64(len(outputFlow)))
 	klog.V(2).Infof("FlowExporter considered flows in conntrack: %d", len(antreaConns))
 	return antreaConns, nil
 }

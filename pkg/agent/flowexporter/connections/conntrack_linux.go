@@ -18,13 +18,18 @@ package connections
 
 import (
 	"net"
+	"strconv"
+	"strings"
 
 	"github.com/ti-mo/conntrack"
 	"k8s.io/klog"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/config"
 	"github.com/vmware-tanzu/antrea/pkg/agent/flowexporter"
+	"github.com/vmware-tanzu/antrea/pkg/agent/metrics"
 	"github.com/vmware-tanzu/antrea/pkg/agent/util/sysctl"
+
+	"os/exec"
 )
 
 // connTrackSystem implements ConnTrackDumper. This is for linux kernel datapath.
@@ -44,11 +49,26 @@ func NewConnTrackSystem(nodeConfig *config.NodeConfig, serviceCIDR *net.IPNet) *
 	// Do not fail, but continue after logging error as we can still dump flows with no timestamps.
 	sysctl.EnsureSysctlNetValue("netfilter/nf_conntrack_timestamp", 1)
 
-	return &connTrackSystem{
+	ct := &connTrackSystem{
 		nodeConfig,
 		serviceCIDR,
 		&netFilterConnTrack{},
 	}
+
+	// Set the antrea_agent_conntrack_max_connection_count prometheus metric
+	cmdOutput, err := exec.Command("cat", "/proc/sys/net/nf_conntrack_max").Output()
+	if err != nil {
+		klog.Errorf("error when executing cat /proc/sys/net/nf_conntrack_max command: %v", err)
+		return nil
+	}
+	maxConns, err := strconv.Atoi(strings.TrimSpace(string(cmdOutput)))
+	if err != nil {
+		klog.Errorf("error when convert nf_conntrack_max cmdoutput to int: %v", err)
+		return nil
+	}
+	metrics.MaxConnectionsInConnTrackTable.Set(float64(maxConns))
+
+	return ct
 }
 
 // DumpFlows opens netlink connection and dumps all the flows in Antrea ZoneID of conntrack table.
@@ -68,6 +88,9 @@ func (ct *connTrackSystem) DumpFlows(zoneFilter uint16) ([]*flowexporter.Connect
 		klog.Errorf("Error when dumping flows from conntrack: %v", err)
 		return nil, err
 	}
+
+	metrics.TotalConnectionsInConnTrackTable.Set(float64(len(conns)))
+
 	filteredConns := filterAntreaConns(conns, ct.nodeConfig, ct.serviceCIDR, zoneFilter)
 	klog.V(2).Infof("No. of flow exporter considered flows in Antrea zoneID: %d", len(filteredConns))
 
